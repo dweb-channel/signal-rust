@@ -5,7 +5,7 @@ use std::{
 };
 use lazy_static::lazy_static;
 
-trait Callback<Args> :Send + Sync {
+pub trait Callback<Args> :Send + Sync {
     fn call(&mut self, args: Args) -> Box<dyn Any>;
     fn clone_box(&self) -> Box<dyn Callback<Args>>;
 }
@@ -75,7 +75,7 @@ pub struct Signal<Args> {
 }
 
 impl<Args: Clone> Signal<Args> {
-    fn listen(&mut self, cb:  Box<dyn Callback<Args>+ 'static>)  {
+   pub fn listen(&mut self, cb:  Box<dyn Callback<Args>+ 'static>)  {
         self.listener_set.lock().unwrap().insert(cb.clone());
         // let listener = Arc::new(move |cb| {
         //     self.listener_set.lock().unwrap().remove(&cb)
@@ -83,11 +83,11 @@ impl<Args: Clone> Signal<Args> {
         // listener
     }
 
-    fn off(&mut self, cb:  Box<dyn Callback<Args>>) -> bool {
+    pub fn off(&mut self, cb:  Box<dyn Callback<Args>>) -> bool {
         self.listener_set.lock().unwrap().remove(&cb)
     }
 
-     fn emit(&mut self, args: Args) {
+    pub fn emit(&mut self, args: Args) {
         let cbs = self.listener_set.lock().unwrap().clone();
         for   mut cb in cbs {
                  match cb.call(args.clone()).downcast::<SignalCtor>() {
@@ -103,7 +103,7 @@ impl<Args: Clone> Signal<Args> {
         }
     }
 
-    fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.listener_set.lock().unwrap().clear();
     }
 }
