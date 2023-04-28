@@ -1,10 +1,6 @@
-use std::{
-    any::Any,
-    borrow::BorrowMut,
-    collections::HashSet,
-    hash::{Hash, Hasher},
-    sync::{Arc, Mutex, RwLock},
-};
+use std::sync::mpsc::{channel, Sender};
+use std::sync::RwLock;
+use std::{any::Any, sync::Arc};
 pub trait Callback<Args>: Send + Sync {
     fn call(&mut self, args: Args) -> Box<dyn Any>;
 }
@@ -16,16 +12,6 @@ where
         self(args)
     }
 }
-
-// pub trait WarpCallback<Args> : Send {
-//     fn init(&mut self,args:Args) -> SharingCallback<Args> {
-//         Arc::new(Mutex::new(args))
-//     }
-// } 
-
-type SimpleCallback = dyn Callback<()>;
-type OffListener<Args> = Arc<dyn FnMut(Arc<Mutex<dyn Callback<Args>>>) -> bool>;
-type SharingCallback<Args> =  Arc<Mutex<dyn Callback<Args>>>;
 
 #[derive(Clone)]
 pub enum SignalCtor {
@@ -39,121 +25,124 @@ pub enum SignalCtor {
     BREAK,
 }
 
-pub struct Signal<Args> {
-    listener_set: RwLock<HashSet<Arc<Mutex<dyn Callback<Args>>>>>,
+// type OffListener<Args> = Arc<dyn FnMut(Arc<Mutex<dyn Callback<Args>>>) -> bool>;
+type Listener = Arc<dyn Fn() + Send + Sync>;
+
+pub struct Signal {
+    sender: Sender<()>,
+    listeners: Arc<RwLock<Vec<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
-impl<Args: Clone + 'static> Signal<Args> {
+impl Signal {
     pub fn new() -> Self {
-        return Self {
-            listener_set: RwLock::new(HashSet::new()),
-        };
+        let (sender, _receiver) = channel();
+        let listeners: Arc<RwLock<Vec<Listener>>> = Arc::new(RwLock::new(Vec::new()));
+        Signal { sender, listeners }
     }
 
-    pub fn listen(self, cb:SharingCallback<Args>) -> OffListener<Args> {
-        self.listener_set.write().unwrap().insert(cb.clone());
-        let listener = Arc::new(move |cb| self.off(cb));
-        listener
-    }
+    pub fn emit(&self) {
+        // 发送一个空的消息给所有监听器
+        let _ = self.sender.send(());
 
-    pub fn off(&self, cb:SharingCallback<Args>) -> bool {
-        self.listener_set.write().unwrap().remove(&cb)
-    }
-
-    pub fn emit(&mut self, args: Args) {
-        let mut cbs = self.listener_set.write().unwrap();
-        for cb in cbs.borrow_mut().iter() {
-            match cb.lock().unwrap().call(args) {
-                signal => {
-                    let signal_ctor = match signal.downcast_ref::<SignalCtor>() {
-                        Some(SignalCtor::OFF) => {
-                            let cb_ref = cb.clone();
-                            // self.off(Box::new(cb_ref));
-                            break;
-                        }
-                        Some(SignalCtor::BREAK) => break,
-                        _ => panic!("Invalid signal type!"),
-                    };
-                }
-            }
+        // 调用所有监听器的函数
+        let listeners = self.listeners.read().unwrap();
+        for listener in listeners.iter() {
+            listener();
         }
     }
 
-    pub fn clear(&mut self) {
-        self.listener_set.write().unwrap().clear();
+    pub fn listener<F>(&self, listener: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        let listener = Arc::new(listener);
+        let mut listeners = self.listeners.write().unwrap();
+        listeners.push(listener);
+    }
+
+    pub fn off<F>(&self, listener: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        // 移除一个监听器
+        let mut listeners = self.listeners.write().unwrap();
+        listeners.retain(|l| {
+            let ptr = l.as_ref() as *const dyn Fn() as *const ();
+            let listener_ptr = &listener as *const dyn Fn() as *const ();
+            ptr != listener_ptr
+        });
+    }
+
+    pub fn close(&self) {
+        // 关闭信号
+        let _ = self.sender.send(()); // 发送一个空的消息给所有监听器
+        let mut listeners = self.listeners.write().unwrap();
+        listeners.clear();
     }
 }
 
-pub type SimpleSignal = Signal<()>;
-
-impl<Args> PartialEq for dyn Callback<Args> {
-    fn eq(&self, other: &Self) -> bool {
-        // 比较 vtable 是否相等
-        std::ptr::eq(
-            // as_ref() 转换为 &dyn Callback<Args>
-            self as *const dyn Callback<Args>,
-            other as *const dyn Callback<Args>,
-        )
-    }
-}
-
-impl<Args> Eq for dyn Callback<Args> {}
-
-impl<Args> Hash for dyn Callback<Args> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // 使用 vtable 的地址作为 hash 值
-        std::ptr::hash(self, state)
-    }
-}
+pub type SimpleSignal = Signal;
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
+
+    use std::sync::Mutex;
 
     use super::*;
-    #[derive(Clone)]
-    struct MyArgs {
-        arg1: i32,
-        arg2: i32,
-    }
+    #[test]
+    fn test_multi_emit() {
+        let signal = Signal::new();
+        let count = Arc::new(RwLock::new(0));
 
-    struct MyCallback {}
+        // 添加监听器
+        let count_clone = count.clone();
+        signal.listener(move || {
+            let mut count = count_clone.write().unwrap();
+            *count += 1;
+        });
 
-    impl Callback<MyArgs> for MyCallback {
-        fn call(&mut self, args: MyArgs) -> Box<dyn Any> {
-            println!("Received signal with args: ({}, {})", args.arg1, args.arg2);
-            Box::new(SignalCtor::BREAK)
-        }
+        // 发送通知并等待一段时间
+        signal.emit();
+        signal.emit();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // 检查计数器是否被增加
+        let count = count.read().unwrap();
+        assert_eq!(*count, 2);
     }
 
     #[test]
-    fn test_signal() {
-        let mut signal = Signal::new();
+    fn test_multi_listener() {
+        let signal = Signal::new();
+        let count: Arc<Mutex<i32>> = Arc::new(Mutex::new(0));
 
-        // Add a listener
-        let cb = Arc::new(Mutex::new(MyCallback {}));
-        let listener = signal.listen(cb);
-        assert_eq!(signal.listener_set.read().unwrap().len(), 1);
+        // 添加两个监听器
+        let count_clone = count.clone();
+        signal.listener(move || {
+            let mut count: std::sync::MutexGuard<i32> = count_clone.lock().unwrap();
+            *count += 1;
+        });
 
-        // Emit a signal
-        signal.emit(MyArgs { arg1: 1, arg2: 2 });
-        thread::sleep(std::time::Duration::from_secs(1));
+        let count_clone = count.clone();
+        signal.listener(move || {
+            let mut count = count_clone.lock().unwrap();
+            *count += 1;
+        });
 
-        // Remove the listener
-        signal.off(cb);
-        assert_eq!(signal.listener_set.read().unwrap().len(), 0);
+        // 发送通知并等待一段时间
+        signal.emit();
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Emit a signal (should not call any listeners)
-        signal.emit(MyArgs { arg1: 3, arg2: 4 });
-        thread::sleep(std::time::Duration::from_secs(1));
+        let count_clone = count.clone();
 
-        // Add another listener
-        let cb2 =  Arc::new(Mutex::new(MyCallback {}))
-        let listener2 = signal.listen(cb2);
-        assert_eq!(signal.listener_set.read().unwrap().len(), 1);
+        // // 检查计数器是否被增加
+        let count = count.lock().unwrap();
+        assert_eq!(*count, 2);
 
-        // Clear all listeners
-        signal.clear();
-        assert_eq!(signal.listener_set.read().unwrap().len(), 0);
+        // 移除第一个监听器
+        signal.off(move || {
+            let mut count = count_clone.lock().unwrap();
+            *count += 1;
+        });
     }
 }
