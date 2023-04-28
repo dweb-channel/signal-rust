@@ -1,31 +1,19 @@
 use std::sync::mpsc::{channel, Sender};
+use std::sync::Arc;
 use std::sync::RwLock;
-use std::{any::Any, sync::Arc};
-pub trait Callback<Args>: Send + Sync {
-    fn call(&mut self, args: Args) -> Box<dyn Any>;
-}
-impl<Args, F: Send + Sync> Callback<Args> for F
-where
-    F: Clone + FnMut(Args) -> Box<dyn Any>,
-{
-    fn call(&mut self, args: Args) -> Box<dyn Any> {
-        self(args)
-    }
-}
 
-#[derive(Clone)]
-pub enum SignalCtor {
-    /**
-     * 返回该值，会解除监听
-     */
-    OFF,
-    /**
-     * 返回该值，会让接下来的其它监听函数不再触发
-     */
-    BREAK,
-}
+// #[derive(Clone)]
+// pub enum SignalCtor {
+//     /**
+//      * 返回该值，会解除监听
+//      */
+//     OFF,
+//     /**
+//      * 返回该值，会让接下来的其它监听函数不再触发
+//      */
+//     BREAK,
+// }
 
-// type OffListener<Args> = Arc<dyn FnMut(Arc<Mutex<dyn Callback<Args>>>) -> bool>;
 type Listener = Arc<dyn Fn() + Send + Sync>;
 
 pub struct Signal {
